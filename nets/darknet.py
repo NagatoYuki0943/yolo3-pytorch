@@ -1,3 +1,7 @@
+"""
+LeakyReLU
+"""
+
 import math
 from collections import OrderedDict
 
@@ -11,11 +15,16 @@ import torch.nn as nn
 #---------------------------------------------------------------------#
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes):
+        """
+        没有降采样和通道变化,不然没法相加
+        inplanes: in_channel 等于planes[1]  删除了,使用了plane[1]
+        planes: list,两个卷积的out_channel
+        """
         super(BasicBlock, self).__init__()
         self.conv1  = nn.Conv2d(inplanes, planes[0], kernel_size=1, stride=1, padding=0, bias=False)
         self.bn1    = nn.BatchNorm2d(planes[0])
         self.relu1  = nn.LeakyReLU(0.1)
-        
+
         self.conv2  = nn.Conv2d(planes[0], planes[1], kernel_size=3, stride=1, padding=1, bias=False)
         self.bn2    = nn.BatchNorm2d(planes[1])
         self.relu2  = nn.LeakyReLU(0.1)
@@ -34,8 +43,12 @@ class BasicBlock(nn.Module):
         out += residual
         return out
 
+# 416,416,3 -> 13,13,1024
 class DarkNet(nn.Module):
     def __init__(self, layers):
+        """
+        layers: 5层的重复次数
+        """
         super(DarkNet, self).__init__()
         self.inplanes = 32
         # 416,416,3 -> 416,416,32
@@ -43,7 +56,7 @@ class DarkNet(nn.Module):
         self.bn1    = nn.BatchNorm2d(self.inplanes)
         self.relu1  = nn.LeakyReLU(0.1)
 
-        # 416,416,32 -> 208,208,64
+        # 416,416,32 -> 208,208,64   中间通道,进出通道
         self.layer1 = self._make_layer([32, 64], layers[0])
         # 208,208,64 -> 104,104,128
         self.layer2 = self._make_layer([64, 128], layers[1])
@@ -54,6 +67,7 @@ class DarkNet(nn.Module):
         # 26,26,512 -> 13,13,1024
         self.layer5 = self._make_layer([512, 1024], layers[4])
 
+        # 所有层的out_channels
         self.layers_out_filters = [64, 128, 256, 512, 1024]
 
         # 进行权值初始化
@@ -69,15 +83,21 @@ class DarkNet(nn.Module):
     #   在每一个layer里面，首先利用一个步长为2的3x3卷积进行下采样
     #   然后进行残差结构的堆叠
     #---------------------------------------------------------------------#
-    def _make_layer(self, planes, blocks):
+    def _make_layer(self, planes, repeats):
+        """
+        planes: list,BasicBlock中两个卷积的out_channel
+        repeats: 重复次数
+        """
         layers = []
         # 下采样，步长为2，卷积核大小为3
         layers.append(("ds_conv", nn.Conv2d(self.inplanes, planes[1], kernel_size=3, stride=2, padding=1, bias=False)))
         layers.append(("ds_bn", nn.BatchNorm2d(planes[1])))
         layers.append(("ds_relu", nn.LeakyReLU(0.1)))
         # 加入残差结构
-        self.inplanes = planes[1]
-        for i in range(0, blocks):
+        self.inplanes = planes[1]   # in_channel就是BasicBlock的out_channel
+
+        # 加入残差结构
+        for i in range(0, repeats):
             layers.append(("residual_{}".format(i), BasicBlock(self.inplanes, planes)))
         return nn.Sequential(OrderedDict(layers))
 
@@ -88,9 +108,9 @@ class DarkNet(nn.Module):
 
         x = self.layer1(x)
         x = self.layer2(x)
-        out3 = self.layer3(x)
-        out4 = self.layer4(out3)
-        out5 = self.layer5(out4)
+        out3 = self.layer3(x)       # 52,52,256
+        out4 = self.layer4(out3)    # 26,26,512
+        out5 = self.layer5(out4)    # 13,13,1024
 
         return out3, out4, out5
 

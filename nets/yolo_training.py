@@ -5,6 +5,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+"""
+计算yolo的损失
+"""
 class YOLOLoss(nn.Module):
     def __init__(self, anchors, num_classes, input_shape, cuda, anchors_mask = [[6,7,8], [3,4,5], [0,1,2]]):
         super(YOLOLoss, self).__init__()
@@ -13,11 +16,11 @@ class YOLOLoss(nn.Module):
         #   26x26的特征层对应的anchor是[30,61],[62,45],[59,119]
         #   52x52的特征层对应的anchor是[10,13],[16,30],[33,23]
         #-----------------------------------------------------------#
-        self.anchors        = anchors
+        self.anchors        = anchors           # 先验框
         self.num_classes    = num_classes
-        self.bbox_attrs     = 5 + num_classes
-        self.input_shape    = input_shape
-        self.anchors_mask   = anchors_mask
+        self.bbox_attrs     = 5 + num_classes   # 每个框的属性 4+1+num_classes
+        self.input_shape    = input_shape       # 原始图像高宽
+        self.anchors_mask   = anchors_mask      # [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
 
         self.giou           = True
         self.balance        = [0.4, 1.0, 4]
@@ -26,7 +29,7 @@ class YOLOLoss(nn.Module):
         self.cls_ratio      = 1 * (num_classes / 80)
 
         self.ignore_threshold = 0.5
-        self.cuda           = cuda
+        self.cuda = cuda
 
     def clip_by_tensor(self, t, t_min, t_max):
         t = t.float()
@@ -34,9 +37,11 @@ class YOLOLoss(nn.Module):
         result = (result <= t_max).float() * result + (result > t_max).float() * t_max
         return result
 
+    # 均方误差,回归问题
     def MSELoss(self, pred, target):
         return torch.pow(pred - target, 2)
 
+    # pred经过sigmoid就使用BCELoss,一般应用于二分类
     def BCELoss(self, pred, target):
         epsilon = 1e-7
         pred    = self.clip_by_tensor(pred, epsilon, 1.0 - epsilon)
@@ -94,49 +99,55 @@ class YOLOLoss(nn.Module):
         #----------------------------------------------------#
         enclose_area    = enclose_wh[..., 0] * enclose_wh[..., 1]
         giou            = iou - (enclose_area - union_area) / enclose_area
-        
+
         return giou
-        
+
     def forward(self, l, input, targets=None):
         #----------------------------------------------------#
-        #   l代表的是，当前输入进来的有效特征层，是第几个有效特征层
-        #   input的shape为  bs, 3*(5+num_classes), 13, 13
-        #                   bs, 3*(5+num_classes), 26, 26
-        #                   bs, 3*(5+num_classes), 52, 52
-        #   targets代表的是真实框。
+        #   l:     当前输入进来的有效特征层是第几个有效特征层
+        #   input: 当前特征层的输出
+        #   input的shape为  b, 3*(5+num_classes), 13, 13
+        #                   b, 3*(5+num_classes), 26, 26
+        #                   b, 3*(5+num_classes), 52, 52
+        #   targets: 是真实框。
         #----------------------------------------------------#
         #--------------------------------#
-        #   获得图片数量，特征层的高和宽
-        #   13和13
+        #   获得图片数量(batch_size)，特征层的高和宽
+        #   hw: 13x13
         #--------------------------------#
         bs      = input.size(0)
         in_h    = input.size(2)
         in_w    = input.size(3)
         #-----------------------------------------------------------------------#
-        #   计算步长
+        #   计算步长,一次找多少像素,每个特征点对应原图多少个像素
         #   每一个特征点对应原来的图片上多少个像素点
         #   如果特征层为13x13的话，一个特征点就对应原来的图片上的32个像素点
         #   如果特征层为26x26的话，一个特征点就对应原来的图片上的16个像素点
         #   如果特征层为52x52的话，一个特征点就对应原来的图片上的8个像素点
-        #   stride_h = stride_w = 32、16、8
+        #   stride_h = stride_w = 416/13=32、416/26=16、416/52=8
         #   stride_h和stride_w都是32。
         #-----------------------------------------------------------------------#
         stride_h = self.input_shape[0] / in_h
         stride_w = self.input_shape[1] / in_w
         #-------------------------------------------------#
+        #   调整anchor的宽高到相对于特征层的大小(除以步长即可)
         #   此时获得的scaled_anchors大小是相对于特征层的
         #-------------------------------------------------#
         scaled_anchors  = [(a_w / stride_w, a_h / stride_h) for a_w, a_h in self.anchors]
         #-----------------------------------------------#
         #   输入的input一共有三个，他们的shape分别是
-        #   bs, 3*(5+num_classes), 13, 13 => batch_size, 3, 13, 13, 5 + num_classes
-        #   batch_size, 3, 26, 26, 5 + num_classes
-        #   batch_size, 3, 52, 52, 5 + num_classes
+        #   permute() 将分类转换到最后
+        #   b, 3*(5+num_classes), 13, 13 => b, 3, 5+num_classes, 13, 13 => b, 3, 13, 13, 5+num_classes  5是中心xy,宽高,是否有物体
+        #   b, 3, 26, 26, 5 + num_classes
+        #   b, 3, 52, 52, 5 + num_classes
+        #   5 + num_classes = 4 + 1 + num_classes  4代表x_offset, y_offset, h, w 1代表置信度
         #-----------------------------------------------#
         prediction = input.view(bs, len(self.anchors_mask[l]), self.bbox_attrs, in_h, in_w).permute(0, 1, 3, 4, 2).contiguous()
-        
+
         #-----------------------------------------------#
         #   先验框的中心位置的调整参数
+        #   sigmoid固定到0~1之间,每个框的中心点是按照分隔后的最近的左上角点为重心,就是物体位置由网格左上角来负责预测
+        #   调整到0~1之间就是坐标点的移动位置在右下角的方框内
         #-----------------------------------------------#
         x = torch.sigmoid(prediction[..., 0])
         y = torch.sigmoid(prediction[..., 1])
@@ -151,6 +162,7 @@ class YOLOLoss(nn.Module):
         conf = torch.sigmoid(prediction[..., 4])
         #-----------------------------------------------#
         #   种类置信度
+        #   0~1之间,表示可能性
         #-----------------------------------------------#
         pred_cls = torch.sigmoid(prediction[..., 5:])
 
@@ -160,6 +172,7 @@ class YOLOLoss(nn.Module):
         y_true, noobj_mask, box_loss_scale = self.get_target(l, targets, scaled_anchors, in_h, in_w)
 
         #---------------------------------------------------------------#
+        #   获得网络应该忽略的特征点,重合率高的忽略,重合率低的设为负样本
         #   将预测结果进行解码，判断预测结果和真实值的重合程度
         #   如果重合程度过大则忽略，因为这些特征点属于预测比较准确的特征点
         #   作为负样本不合适
@@ -170,12 +183,13 @@ class YOLOLoss(nn.Module):
             y_true          = y_true.type_as(x)
             noobj_mask      = noobj_mask.type_as(x)
             box_loss_scale  = box_loss_scale.type_as(x)
-        #--------------------------------------------------------------------------#
+        #-----------------------------------------------------------#
+        #   reshape_y_true[...,2:3]和reshape_y_true[...,3:4]
         #   box_loss_scale是真实框宽高的乘积，宽高均在0-1之间，因此乘积也在0-1之间。
         #   2-宽高的乘积代表真实框越大，比重越小，小框的比重更大。
-        #--------------------------------------------------------------------------#
+        #-----------------------------------------------------------#
         box_loss_scale = 2 - box_loss_scale
-            
+
         loss        = 0
         obj_mask    = y_true[..., 4] == 1
         n           = torch.sum(obj_mask)
@@ -189,19 +203,29 @@ class YOLOLoss(nn.Module):
             else:
                 #-----------------------------------------------------------#
                 #   计算中心偏移情况的loss，使用BCELoss效果好一些
+        		#   x,y计算了sigmoid,不能使用均方误差,要使用BCELoss
                 #-----------------------------------------------------------#
                 loss_x      = torch.mean(self.BCELoss(x[obj_mask], y_true[..., 0][obj_mask]) * box_loss_scale[obj_mask])
                 loss_y      = torch.mean(self.BCELoss(y[obj_mask], y_true[..., 1][obj_mask]) * box_loss_scale[obj_mask])
                 #-----------------------------------------------------------#
                 #   计算宽高调整值的loss
+				#   MSELoss是均方误差
                 #-----------------------------------------------------------#
                 loss_w      = torch.mean(self.MSELoss(w[obj_mask], y_true[..., 2][obj_mask]) * box_loss_scale[obj_mask])
                 loss_h      = torch.mean(self.MSELoss(h[obj_mask], y_true[..., 3][obj_mask]) * box_loss_scale[obj_mask])
                 loss_loc    = (loss_x + loss_y + loss_h + loss_w) * 0.1
 
+	        #-----------------------------------------------------------#
+	        #   所有正样本分类损失,不使用交叉熵,用的是BCELoss   y_true[..., 4] == 1 包含物体才计算损失
+	        #-----------------------------------------------------------#
             loss_cls    = torch.mean(self.BCELoss(pred_cls[obj_mask], y_true[..., 5:][obj_mask]))
+			# loss总和
             loss        += loss_loc * self.box_ratio + loss_cls * self.cls_ratio
 
+        #-----------------------------------------------------------#
+        #   计算置信度的loss = 正样本loss(y_true) + 负样本loss(noobj_mask)
+        #   计算了sigmoid,不能使用均方误差,要使用BCELoss
+        #-----------------------------------------------------------#
         loss_conf   = torch.mean(self.BCELoss(conf, obj_mask.type_as(conf))[noobj_mask.bool() | obj_mask])
         loss        += loss_conf * self.balance[l] * self.obj_ratio
         # if n != 0:
@@ -251,36 +275,42 @@ class YOLOLoss(nn.Module):
         #-----------------------------------------------------------#
         union = area_a + area_b - inter
         return inter / union  # [A,B]
-    
+
+    """获得网络应该有的预测结果"""
     def get_target(self, l, targets, anchors, in_h, in_w):
         #-----------------------------------------------------#
-        #   计算一共有多少张图片
+        #   计算一共有多少张图片 batch_size
         #-----------------------------------------------------#
         bs              = len(targets)
         #-----------------------------------------------------#
         #   用于选取哪些先验框不包含物体
+        #   b, 3, h, w   len(self.anchors_mask[l])=3 3中先验框
+        #   默认为1,认为全不包含物体
         #-----------------------------------------------------#
         noobj_mask      = torch.ones(bs, len(self.anchors_mask[l]), in_h, in_w, requires_grad = False)
         #-----------------------------------------------------#
-        #   让网络更加去关注小目标
+        #   增强小目标权重,减小大目标权重,让网络更加去关注小目标
         #-----------------------------------------------------#
         box_loss_scale  = torch.zeros(bs, len(self.anchors_mask[l]), in_h, in_w, requires_grad = False)
         #-----------------------------------------------------#
+        #   网络应该有的预测结果
         #   batch_size, 3, 13, 13, 5 + num_classes
         #-----------------------------------------------------#
         y_true          = torch.zeros(bs, len(self.anchors_mask[l]), in_h, in_w, self.bbox_attrs, requires_grad = False)
-        for b in range(bs):            
+
+        # 对每张图片单独处理
+        for b in range(bs):
             if len(targets[b])==0:
                 continue
             batch_target = torch.zeros_like(targets[b])
             #-------------------------------------------------------#
             #   计算出正样本在特征层上的中心点
             #-------------------------------------------------------#
-            batch_target[:, [0,2]] = targets[b][:, [0,2]] * in_w
+            batch_target[:, [0,2]] = targets[b][:, [0,2]] * in_w    # 真实框是归一化的,要乘以宽高
             batch_target[:, [1,3]] = targets[b][:, [1,3]] * in_h
             batch_target[:, 4] = targets[b][:, 4]
             batch_target = batch_target.cpu()
-            
+
             #-------------------------------------------------------#
             #   将真实框转换一个形式
             #   num_true_box, 4
@@ -288,29 +318,32 @@ class YOLOLoss(nn.Module):
             gt_box          = torch.FloatTensor(torch.cat((torch.zeros((batch_target.size(0), 2)), batch_target[:, 2:4]), 1))
             #-------------------------------------------------------#
             #   将先验框转换一个形式
-            #   9, 4
+            #   [9, 4]
             #-------------------------------------------------------#
             anchor_shapes   = torch.FloatTensor(torch.cat((torch.zeros((len(anchors), 2)), torch.FloatTensor(anchors)), 1))
             #-------------------------------------------------------#
-            #   计算交并比
-            #   self.calculate_iou(gt_box, anchor_shapes) = [num_true_box, 9]每一个真实框和9个先验框的重合情况
-            #   best_ns:
-            #   [每个真实框最大的重合度max_iou, 每一个真实框最重合的先验框的序号]
+            #   计算真实框和先验框交并比IoU
+            #   self.calculate_iou(gt_box, anchor_shapes) = [num_true_box, 9] 每一个真实框和9个先验框的重合情况
+            #   best_ns: 二维
+            #       [每个真实框最大的重合度max_iou, 每一个真实框最重合的先验框的序号]
+            #   argmax返回下标,argmax返回下标,即先验框序号
             #-------------------------------------------------------#
             best_ns = torch.argmax(self.calculate_iou(gt_box, anchor_shapes), dim=-1)
 
             for t, best_n in enumerate(best_ns):
+
+                # 判断当前先验框是否属于这一层
                 if best_n not in self.anchors_mask[l]:
                     continue
                 #----------------------------------------#
                 #   判断这个先验框是当前特征点的哪一个先验框
                 #----------------------------------------#
-                k = self.anchors_mask[l].index(best_n)
+                k = self.anchors_mask[l].index(best_n)      # c通道
                 #----------------------------------------#
                 #   获得真实框属于哪个网格点
                 #----------------------------------------#
-                i = torch.floor(batch_target[t, 0]).long()
-                j = torch.floor(batch_target[t, 1]).long()
+                i = torch.floor(batch_target[t, 0]).long()  # w通道
+                j = torch.floor(batch_target[t, 1]).long()  # h通道
                 #----------------------------------------#
                 #   取出真实框的种类
                 #----------------------------------------#
@@ -318,8 +351,9 @@ class YOLOLoss(nn.Module):
 
                 #----------------------------------------#
                 #   noobj_mask代表无目标的特征点
+                #   [b, k, j, i] = [b, c, h, w]
                 #----------------------------------------#
-                noobj_mask[b, k, j, i] = 0
+                noobj_mask[b, k, j, i] = 0                  # 有目标,将无目标设置为0
                 #----------------------------------------#
                 #   tx、ty代表中心调整参数的真实值
                 #----------------------------------------#
@@ -327,12 +361,12 @@ class YOLOLoss(nn.Module):
                     #----------------------------------------#
                     #   tx、ty代表中心调整参数的真实值
                     #----------------------------------------#
-                    y_true[b, k, j, i, 0] = batch_target[t, 0] - i.float()
-                    y_true[b, k, j, i, 1] = batch_target[t, 1] - j.float()
-                    y_true[b, k, j, i, 2] = math.log(batch_target[t, 2] / anchors[best_n][0])
-                    y_true[b, k, j, i, 3] = math.log(batch_target[t, 3] / anchors[best_n][1])
-                    y_true[b, k, j, i, 4] = 1
-                    y_true[b, k, j, i, c + 5] = 1
+                    y_true[b, k, j, i, 0] = batch_target[t, 0] - i.float()  # x_offset
+                    y_true[b, k, j, i, 1] = batch_target[t, 1] - j.float()  # y_offset
+                    y_true[b, k, j, i, 2] = math.log(batch_target[t, 2] / anchors[best_n][0])   # h
+                    y_true[b, k, j, i, 3] = math.log(batch_target[t, 3] / anchors[best_n][1])   # w
+                    y_true[b, k, j, i, 4] = 1                               # 先验框有包含物体
+                    y_true[b, k, j, i, c + 5] = 1                           # 先验框物体种类
                 else:
                     #----------------------------------------#
                     #   tx、ty代表中心调整参数的真实值
@@ -346,11 +380,15 @@ class YOLOLoss(nn.Module):
                 #----------------------------------------#
                 #   用于获得xywh的比例
                 #   大目标loss权重小，小目标loss权重大
+                #   真实框宽高相乘,除以有效特征层宽高,归一化结果 小目标结果小,大目标结果大,
+                #   后续计算 2 - box_loss_scale 让真实框越大，比重越小，小框的比重更大。
                 #----------------------------------------#
-                box_loss_scale[b, k, j, i] = batch_target[t, 2] * batch_target[t, 3] / in_w / in_h
+                box_loss_scale[b, k, j, i] = batch_target[t, 2] * batch_target[t, 3] / in_w / in_h  # 真实框宽高相乘,除以有效特征层宽高,归一化结果
         return y_true, noobj_mask, box_loss_scale
 
+    """获得网络应该忽略的特征点,重合率高的忽略,重合率低的设为负样本"""
     def get_ignore(self, l, x, y, h, w, targets, scaled_anchors, in_h, in_w, noobj_mask):
+        # 对预测结果进行解码,一直到for循环
         #-----------------------------------------------------#
         #   计算一共有多少张图片
         #-----------------------------------------------------#
@@ -379,8 +417,9 @@ class YOLOLoss(nn.Module):
         pred_boxes_w    = torch.unsqueeze(torch.exp(w) * anchor_w, -1)
         pred_boxes_h    = torch.unsqueeze(torch.exp(h) * anchor_h, -1)
         pred_boxes      = torch.cat([pred_boxes_x, pred_boxes_y, pred_boxes_w, pred_boxes_h], dim = -1)
-        
-        for b in range(bs):           
+
+        # 循环batch_size,就是循环每一张图片
+        for b in range(bs):
             #-------------------------------------------------------#
             #   将预测结果转换一个形式
             #   pred_boxes_for_ignore      num_anchors, 4
@@ -388,27 +427,29 @@ class YOLOLoss(nn.Module):
             pred_boxes_for_ignore = pred_boxes[b].view(-1, 4)
             #-------------------------------------------------------#
             #   计算真实框，并把真实框转换成相对于特征层的大小
-            #   gt_box      num_true_box, 4
+            #   gt_box:    [num_true_box, 4]
             #-------------------------------------------------------#
             if len(targets[b]) > 0:
                 batch_target = torch.zeros_like(targets[b])
                 #-------------------------------------------------------#
                 #   计算出正样本在特征层上的中心点
+                #   真实框进行缩放,调整为相对于当前特征层的大小
                 #-------------------------------------------------------#
                 batch_target[:, [0,2]] = targets[b][:, [0,2]] * in_w
                 batch_target[:, [1,3]] = targets[b][:, [1,3]] * in_h
                 batch_target = batch_target[:, :4].type_as(x)
                 #-------------------------------------------------------#
                 #   计算交并比
-                #   anch_ious       num_true_box, num_anchors
+                #   anch_ious:      [num_true_box, num_anchors]
                 #-------------------------------------------------------#
                 anch_ious = self.calculate_iou(batch_target, pred_boxes_for_ignore)
                 #-------------------------------------------------------#
                 #   每个先验框对应真实框的最大重合度
-                #   anch_ious_max   num_anchors
+                #   [anch_ious_max,  num_anchors]
                 #-------------------------------------------------------#
                 anch_ious_max, _    = torch.max(anch_ious, dim = 0)
                 anch_ious_max       = anch_ious_max.view(pred_boxes[b].size()[:3])
+                """如果重合率较高就要忽略"""
                 noobj_mask[b][anch_ious_max > self.ignore_threshold] = 0
         return noobj_mask, pred_boxes
 

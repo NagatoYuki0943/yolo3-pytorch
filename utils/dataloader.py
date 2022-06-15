@@ -39,7 +39,18 @@ class YoloDataset(Dataset):
     def rand(self, a=0, b=1):
         return np.random.rand()*(b-a) + a
 
+    """
+    数据增强
+    """
     def get_random_data(self, annotation_line, input_shape, jitter=.3, hue=.1, sat=0.7, val=0.4, random=True):
+        """
+        annotation_line:
+        input_shape: 模型输入大小,如 [416, 416]
+        jitter: 调整图像长宽扭曲
+        hue:    色调
+        sat:    饱和度
+        val:    明度
+        """
         line    = annotation_line.split()
         #------------------------------#
         #   读取图像并转换成RGB图像
@@ -57,7 +68,7 @@ class YoloDataset(Dataset):
         box     = np.array([np.array(list(map(int,box.split(',')))) for box in line[1:]])
 
         if not random:
-            scale = min(w/iw, h/ih)
+            scale = min(w/iw, h/ih) # scale控制图片缩放,边缘加上灰条
             nw = int(iw*scale)
             nh = int(ih*scale)
             dx = (w-nw)//2
@@ -86,7 +97,7 @@ class YoloDataset(Dataset):
                 box = box[np.logical_and(box_w>1, box_h>1)] # discard invalid box
 
             return image_data, box
-                
+
         #------------------------------------------#
         #   对图像进行缩放并且进行长和宽的扭曲
         #------------------------------------------#
@@ -150,10 +161,10 @@ class YoloDataset(Dataset):
             box[:, 3][box[:, 3]>h] = h
             box_w = box[:, 2] - box[:, 0]
             box_h = box[:, 3] - box[:, 1]
-            box = box[np.logical_and(box_w>1, box_h>1)] 
-        
+            box = box[np.logical_and(box_w>1, box_h>1)]
+
         return image_data, box
-    
+
 # DataLoader中collate_fn使用
 def yolo_dataset_collate(batch):
     images = []
@@ -164,3 +175,5 @@ def yolo_dataset_collate(batch):
     images = torch.from_numpy(np.array(images)).type(torch.FloatTensor)
     bboxes = [torch.from_numpy(ann).type(torch.FloatTensor) for ann in bboxes]
     return images, bboxes
+
+
