@@ -75,6 +75,7 @@ class YOLO(object):
         self.__dict__.update(self._defaults)
         for name, value in kwargs.items():
             setattr(self, name, value)
+            self._defaults[name] = value
 
         #---------------------------------------------------#
         #   获得种类和先验框的数量
@@ -184,7 +185,7 @@ class YOLO(object):
                 left    = max(0, np.floor(left).astype('int32'))
                 bottom  = min(image.size[1], np.floor(bottom).astype('int32'))
                 right   = min(image.size[0], np.floor(right).astype('int32'))
-                
+
                 dir_save_path = "img_crop"
                 if not os.path.exists(dir_save_path):
                     os.makedirs(dir_save_path)
