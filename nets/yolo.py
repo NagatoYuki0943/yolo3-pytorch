@@ -100,6 +100,7 @@ class YoloBody(nn.Module):
         # 13,13,512 -> 13,13,512
         out0        = self.last_layer0[5:](out0_branch)     # 后2次利用YoloHead获得预测结果
 
+        # 调整 out0_branch 的输出通道和上采样
         # 13,13,512 -> 13,13,256 -> 26,26,256
         x1_in = self.last_layer1_conv(out0_branch)
         x1_in = self.last_layer1_upsample(x1_in)
@@ -116,6 +117,7 @@ class YoloBody(nn.Module):
         # 26,26,256 -> 26,26,75
         out1        = self.last_layer1[5:](out1_branch)
 
+        # 调整 out1_branch 的输出通道和上采样
         # 26,26,256 -> 26,26,128 -> 52,52,128
         x2_in = self.last_layer2_conv(out1_branch)
         x2_in = self.last_layer2_upsample(x2_in)
@@ -130,4 +132,3 @@ class YoloBody(nn.Module):
         # 52,52,384 -> 52,52,128 -> 52,52,256 -> 52,52,128 -> 52,52,256 -> 52,52,128 -> 52,52,256 -> 52,52,75
         out2 = self.last_layer2(x2_in)
         return out0, out1, out2
-
